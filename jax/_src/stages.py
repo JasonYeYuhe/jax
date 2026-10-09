@@ -31,10 +31,15 @@ executable protocols described above.
 from __future__ import annotations
 
 from collections.abc import Sequence
+import abc
+import contextlib
 import dataclasses
 from dataclasses import dataclass
 import enum
+import hashlib
 import itertools as it
+import re
+import threading
 from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 from jax._src import config
@@ -354,6 +359,12 @@ class Stage:
         i for i, x in enumerate(tree_util.tree_leaves(self.args_info))
         if x.donated)
 
+  @property
+  def can_cache(self) -> bool:
+    """Whether this stage instance is eligible for stage caching."""
+    # Base stages are not cacheable by default.
+    return False
+
 
 def make_args_info(in_tree, in_avals, donate_argnums):
   donate_argnums = frozenset(donate_argnums)
@@ -585,8 +596,10 @@ class Traced(Stage):
           lo._params['name'], fails, lo._meta_tys_flat, 'jit',
           lo.jaxpr.debug_info.safe_arg_names(len(lo.jaxpr.in_avals)))
       raise ValueError(msg) from None
+    has_consts = bool(lo._consts or lo.jaxpr.consts)
     return Lowered(lowering, lo.args_info, lo.out_tree,
-                   in_types=lo._in_types, out_types=lo._out_types)
+                   in_types=lo._in_types, out_types=lo._out_types,
+                   has_consts=has_consts)
 
 
 def lojax_pytree(hi_avals, tree):
@@ -626,7 +639,7 @@ class Lowered(Stage):
   lowering paths (:func:`~jax.jit`, :func:`~jax.pmap`, etc.).
   """
   __slots__ = ["_lowering", "args_info", "out_tree", "_no_kwargs",
-               "_in_types", "_out_types"]
+               "_in_types", "_out_types", "_has_consts"]
 
   _lowering: Lowering
   args_info: Any  # PyTree of ArgInfo, not including the const_args
@@ -634,10 +647,11 @@ class Lowered(Stage):
   _no_kwargs: bool
   _in_types: tuple[tree_util.PyTreeDef, list[core.AbstractValue]] | None
   _out_types: list[core.AbstractValue] | None
+  _has_consts: bool
 
   def __init__(self, lowering: Lowering, args_info,
                out_tree: tree_util.PyTreeDef, no_kwargs: bool = False,
-               in_types=None, out_types=None):
+               in_types=None, out_types=None, has_consts: bool = False):
 
     self._lowering = lowering
     self.args_info = args_info
@@ -645,6 +659,14 @@ class Lowered(Stage):
     self._no_kwargs = no_kwargs
     self._in_types = in_types
     self._out_types = out_types
+    self._has_consts = has_consts
+
+  @property
+  def can_cache(self) -> bool:
+    if self._has_consts or getattr(self._lowering, "const_args", None):
+      return False
+    ca = getattr(self._lowering, "compile_args", {})
+    return not (ca.get("unordered_effects") or ca.get("ordered_effects") or ca.get("host_callbacks"))
 
   @property
   def in_avals(self):
@@ -1125,3 +1147,47 @@ def _device_assignment_mismatch_error(fun_name, fails, args_flat, api_name,
     extra_msg = f" Got{first._str(api_name)} and{second._str(api_name)}"
   msg = (f"Received incompatible devices for {api_name}ted computation.{extra_msg}")
   return msg
+
+
+# TODO(dsuo): Unify or bridge with compilation_cache_interface.CacheInterface
+# (which operates on bytes rather than Stage objects).
+class Cache(abc.ABC):
+  """Abstract base class for JAX stage caching."""
+
+  @abc.abstractmethod
+  def get(self, key: str) -> Any | None:
+    """Retrieve a cached Stage by key, or return None."""
+
+  @abc.abstractmethod
+  def put(self, key: str, value: Any) -> None:
+    """Store a Stage in the cache under key."""
+
+
+_active_cache_tls = threading.local()
+
+
+@contextlib.contextmanager
+def set_cache(cache: Cache):
+  if not hasattr(_active_cache_tls, "stack"):
+    _active_cache_tls.stack = []
+  _active_cache_tls.stack.append(cache)
+  try:
+    yield cache
+  finally:
+    _active_cache_tls.stack.pop()
+
+
+def _get_active_cache(key: str | None = None) -> Cache | None:
+  if key is None or not core.trace_state_clean() or config.debug_key_reuse.value:
+    return None
+  stack = getattr(_active_cache_tls, "stack", None)
+  return stack[-1] if stack else None
+
+
+def _compute_cache_key(
+    stage: type[Stage], user_key: str | None, key_tuple: tuple[Any, ...]
+) -> str:
+  r = re.sub(r" at 0x[0-9a-fA-F]+", "", repr((key_tuple, config.trace_context())))
+  fingerprint = hashlib.sha256(r.encode("utf-8")).hexdigest()[:16]
+  return f"{user_key}:{stage.__name__}:{fingerprint}"
+
