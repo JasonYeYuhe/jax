@@ -70,7 +70,7 @@ class MatmulTestCase(jtu.JaxTestCase, jtu.CudaArchSpecificTest):
     self.enter_context(ir.Location.unknown())
 
   @parameterized.named_parameters(
-      (f"_shard{i}", i) for i in range(5)
+      (f"_shard{i}", i) for i in range(10)
   )
   @seed_hypothesis
   @hp.settings(max_examples=100)  # Add verbosity=hp.Verbosity.verbose to debug
@@ -138,8 +138,7 @@ class MatmulTestCase(jtu.JaxTestCase, jtu.CudaArchSpecificTest):
       raise e
 
   @parameterized.named_parameters(
-      # TODO(apaszke): Increase shard count once we have more B200s in CI.
-      (f"_shard{i}", i) for i in range(1)
+      (f"_shard{i}", i) for i in range(10)
   )
   @seed_hypothesis
   @hp.settings(max_examples=100)  # Add verbosity=hp.Verbosity.verbose to debug
