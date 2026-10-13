@@ -1326,7 +1326,21 @@ def _pjit_lower_jaxpr_to_fun(
   const_args_and_avals = core.jaxpr_const_args(jaxpr)
   const_args, const_arg_avals = util.unzip2(const_args_and_avals)
   in_avals = (*const_arg_avals, *jaxpr.in_avals)
-  ca_shardings = const_args_shardings(const_args)
+  mod_ctx = ctx.module_context
+  axis_ctx = mod_ctx.axis_context
+  is_multi_device = (
+      (isinstance(axis_ctx, sharding_impls.ShardingContext) and
+       axis_ctx.num_devices > 1) or
+      (isinstance(axis_ctx, sharding_impls.SPMDAxisContext) and
+       axis_ctx.mesh.size > 1)
+  )
+  device_or_backend_set = (
+      pxla.check_device_backend_on_shardings(in_shardings) or
+      pxla.check_device_backend_on_shardings(out_shardings))
+  ca_shardings = const_args_shardings(
+      const_args,
+      device_or_backend_set=device_or_backend_set,
+      is_multi_device=is_multi_device)
   in_shardings_expanded = ca_shardings + in_shardings
   ca_layouts = const_args_layouts(const_args, const_arg_avals, ca_shardings)
   in_layouts_expanded = ca_layouts + in_layouts
@@ -1334,7 +1348,6 @@ def _pjit_lower_jaxpr_to_fun(
   assert len(in_avals) == len(const_args) + len(jaxpr.in_avals)
   assert len(in_avals) == len(in_shardings_expanded)
   assert len(in_avals) == len(in_layouts_expanded)
-  mod_ctx = ctx.module_context
   arg_shardings = [None if isinstance(i, UnspecifiedValue) else i
                    for i in in_shardings_expanded]
   result_shardings = [None if isinstance(o, UnspecifiedValue) else o
@@ -1422,10 +1435,23 @@ def _pjit_lowering(ctx: mlir.LoweringRuleContext, *args, name: str,
 # the metadata problem and consolidate the caches.
 mlir.register_lowering(jit_p, _pjit_lowering, cacheable=False)
 
-def const_args_shardings(const_args: Sequence[Array | np.ndarray]) -> Sequence[PjitSharding]:
+def const_args_shardings(
+    const_args: Sequence[Array | np.ndarray],
+    *,
+    device_or_backend_set: bool = False,
+    is_multi_device: bool = False,
+) -> Sequence[PjitSharding]:
+  if device_or_backend_set:
+    return (sharding_impls.UNSPECIFIED,) * len(const_args)
   const_args_types = map(convert_to_metaty, const_args)
-  return _resolve_in_shardings(
+  shardings = _resolve_in_shardings(
       const_args_types, (sharding_impls.UNSPECIFIED,) * len(const_args))
+  if is_multi_device:
+    shardings = tuple(
+        sharding_impls.UNSPECIFIED
+        if not isinstance(s, UnspecifiedValue) and s.num_devices == 1 else s
+        for s in shardings)
+  return shardings
 
 def const_args_layouts(
     const_args: Sequence[ArrayLike],

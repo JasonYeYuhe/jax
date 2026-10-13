@@ -893,17 +893,32 @@ def _discharge_refs_jaxpr(closed_jaxpr, in_shardings, in_layouts,
 def hoist_constants_as_args(
     closed_jaxpr: core.Jaxpr, global_in_avals, in_shardings, in_layouts,
     donated_invars, kept_var_idx: set[int], inout_aliases, mut,
-    all_args_info: AllArgsInfo):
+    all_args_info: AllArgsInfo,
+    out_shardings: Sequence[MaybeSharding] = (),
+    context_mesh: Mesh | AbstractMesh | None = None,
+    intermediate_shardings: Iterable[tuple[JSharding, Any]] = ()):
   const_args, const_arg_avals = unzip2(
       core.jaxpr_const_args(closed_jaxpr)
   )
   num_const_args = len(const_args)
   if num_const_args:
     global_in_avals = list(const_arg_avals) + global_in_avals
-    ca_shardings = pjit.const_args_shardings(const_args)
+    device_or_backend_set = (
+        check_device_backend_on_shardings(in_shardings) or
+        check_device_backend_on_shardings(out_shardings))
+    is_multi_device = (
+        (context_mesh is not None and not context_mesh.empty and
+         context_mesh.size > 1) or
+        any(not isinstance(s, UnspecifiedValue) and s.num_devices > 1
+            for s in it.chain(in_shardings, out_shardings,
+                              (js for js, _ in intermediate_shardings))))
+    ca_shardings = pjit.const_args_shardings(
+        const_args,
+        device_or_backend_set=device_or_backend_set,
+        is_multi_device=is_multi_device)
     in_shardings = (*ca_shardings, *in_shardings)
     ca_layouts = pjit.const_args_layouts(const_args, const_arg_avals,
-                                          ca_shardings)
+                                         ca_shardings)
     in_layouts = (*ca_layouts, *in_layouts)
 
     donated_invars = (False,) * num_const_args + donated_invars
@@ -1008,11 +1023,17 @@ def lower_sharding_computation(
   global_in_avals = closed_jaxpr.in_avals
   global_out_avals = closed_jaxpr.out_avals
 
+  context_mesh = _get_context_mesh(context_mesh)
+  unique_intermediate_shardings = util.stable_unique(
+      dispatch.get_intermediate_shardings(jaxpr))
+
   if lowering_parameters.hoist_constants_as_args:
     (const_args, global_in_avals, in_shardings, in_layouts, donated_invars,
      kept_var_idx, inout_aliases, mut, all_args_info) = hoist_constants_as_args(
          closed_jaxpr, global_in_avals, in_shardings, in_layouts,
-         donated_invars, kept_var_idx, inout_aliases, mut, all_args_info)
+         donated_invars, kept_var_idx, inout_aliases, mut, all_args_info,
+         out_shardings=out_shardings, context_mesh=context_mesh,
+         intermediate_shardings=unique_intermediate_shardings)
   else:
     const_args = []
 
@@ -1023,12 +1044,8 @@ def lower_sharding_computation(
   assert len(out_shardings) == len(out_layouts) == len(global_out_avals), (
       len(out_shardings), len(out_layouts), len(global_out_avals))
 
-  context_mesh = _get_context_mesh(context_mesh)
-
   # Device assignment across all inputs, outputs and shardings inside jaxpr
   # should be the same.
-  unique_intermediate_shardings = util.stable_unique(
-      dispatch.get_intermediate_shardings(jaxpr))
   unique_const_shardings = util.stable_unique(in_shardings[:len(const_args)])
   unique_in_shardings = util.stable_unique(in_shardings[len(const_args):])
   unique_out_shardings = util.stable_unique(out_shardings)
