@@ -1997,9 +1997,10 @@ class MeshExecutable(stages.Executable):
     const_avals = [core.typeof(c) for c in const_args]
     dispatch_layouts = get_dispatch_layouts(
         xla_const_layouts, in_const_shardings, const_avals)
-    return shard_args(in_const_shardings, dispatch_layouts,
-                      [xc.ArrayCopySemantics.REUSE_INPUT] * num_const_args,
-                      const_args)
+    with config.transfer_guard_host_to_device("allow"):
+      return shard_args(in_const_shardings, dispatch_layouts,
+                        [xc.ArrayCopySemantics.REUSE_INPUT] * num_const_args,
+                        const_args)
 
 def cc_shard_arg(x, sharding, layout):
   return shard_args([sharding], [layout], [xc.ArrayCopySemantics.REUSE_INPUT],

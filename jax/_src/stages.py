@@ -964,6 +964,9 @@ class Compiled(Stage):
       self._call = self._executable.create_cpp_call(self._params)
       if self._call is None:
         params = self._params
+        if hasattr(self._executable, "shard_const_args"):
+          params = params._replace(
+              const_args=self._executable.shard_const_args(params.const_args))
         def cpp_call_fallback(*args, **kwargs):
           outs, _, _ = Compiled.call(params, *args, **kwargs)
           return outs
