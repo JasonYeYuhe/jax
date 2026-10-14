@@ -25,6 +25,7 @@ from typing import Any, Literal, assert_never, cast
 
 from jax._src.interpreters import mlir as mlir_interpreter
 from jax._src.lib import mosaic_gpu_dialect as mgpu
+from jax._src.lib import version as jaxlib_version
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import arith
 from jax._src.lib.mlir.dialects import builtin
@@ -1803,15 +1804,16 @@ def _slice_smem(result: ir.MemRefType, offset: int, smem_size: int):
       ir.MemRefType.get((utils.DYNAMIC,), i8, memory_space=utils.smem())
   )
   ir_offset = arith.constant(ir.IndexType.get(), offset)
-  lowered_result_type = result
-  if isinstance(result.element_type, mgpu.BarrierType):
+  # TODO(cjfj): Remove version check once minimum jaxlib version is 0.12.0.
+  if jaxlib_version < (0, 12, 0) and isinstance(
+      result.element_type, mgpu.BarrierType
+  ):
     lowered_result_type = ir.MemRefType.get(
         result.shape, _lowered_barrier_type(), memory_space=utils.smem()
     )
-  view = memref.view(lowered_result_type, smem_base, ir_offset, [])
-  if result == lowered_result_type:
-    return view
-  return builtin.unrealized_conversion_cast([result], [view])
+    view = memref.view(lowered_result_type, smem_base, ir_offset, [])
+    return builtin.unrealized_conversion_cast([result], [view])
+  return memref.view(result, smem_base, ir_offset, [])
 
 
 @_register_lowering(mgpu.WithTransformsOp, support_warp_semantics=True)

@@ -538,26 +538,27 @@ def _construct_smem_reftree(
   flat_ref_tys, smem_buffer_tree = jax.tree.flatten(
       smem_buffers, is_leaf=lambda x: isinstance(x, Union)
   )
-  smem_refs = []
 
+  def barrier_memref(num_barriers: int) -> ir.Value:
+    nonlocal dynamic_smem_offset
+    # TODO(cjfj): Remove version check once minimum jaxlib version is 0.12.0.
+    use_barrier_type = (
+        lowering_semantics == LoweringSemantics.Warpgroup
+        or lib.version >= (0, 12, 0)
+    )
+    barrier_ty = ir.MemRefType.get(
+        (num_barriers,),
+        dialect.BarrierType.get() if use_barrier_type else i64,
+        memory_space=utils.smem(),
+    )
+    barrier_memref = _slice_smem(
+        barrier_ty, dynamic_smem, dynamic_smem_offset, lowering_semantics
+    )
+    dynamic_smem_offset += num_barriers * utils.MBARRIER_BYTES
+    return barrier_memref
+
+  smem_refs = []
   for ref_ty in flat_ref_tys:
-    def barrier_memref(num_barriers: int) -> ir.Value:
-      nonlocal dynamic_smem_offset
-      barrier_ty = ir.MemRefType.get(
-          (num_barriers,),
-          dialect.BarrierType.get()
-          if lowering_semantics == LoweringSemantics.Warpgroup
-          else i64,
-          memory_space=utils.smem(),
-      )
-      barrier_memref = _slice_smem(
-            barrier_ty,
-            dynamic_smem,
-            dynamic_smem_offset,
-            lowering_semantics,
-        )
-      dynamic_smem_offset += num_barriers * utils.MBARRIER_BYTES
-      return barrier_memref
     ref: Any
     match ref_ty:
       case Union(members):
